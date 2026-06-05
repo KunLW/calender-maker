@@ -87,6 +87,30 @@ class EventStore:
             )
         return self.get(event_id)
 
+    def update_and_confirm(self, event_id: int, event: ParsedEvent) -> EventRecord | None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE events
+                SET title = ?, start = ?, end = ?, timezone = ?, location = ?,
+                    description = ?, status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    event.title,
+                    event.start.isoformat(),
+                    event.end.isoformat(),
+                    event.timezone,
+                    event.location,
+                    event.description,
+                    EventStatus.confirmed.value,
+                    now,
+                    event_id,
+                ),
+            )
+        return self.get(event_id)
+
     def confirmed_events(self) -> list[EventRecord]:
         with self.connect() as conn:
             rows: Iterable[sqlite3.Row] = conn.execute(
@@ -111,4 +135,3 @@ def row_to_event(row: sqlite3.Row) -> EventRecord:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
-

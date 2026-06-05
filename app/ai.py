@@ -33,6 +33,8 @@ JSON_INSTRUCTIONS = (
     "JSON 字段必须是：title, start, end, timezone, location, description。"
     "start 和 end 必须是带时区偏移的 ISO 8601 date-time 字符串。"
     "location 和 description 不存在时返回 null。"
+    "description 要尽量完整保留用户输入里的背景、参与人、链接、地点细节、提醒事项、"
+    "推断依据和默认时长；如果做了默认时长推断，要写明。"
     "如果用户没有说结束时间，根据事件类型选择合理默认时长：会议 1 小时，吃饭 1.5 小时，"
     "提醒/待办 30 分钟。不要编造地点。"
 )
@@ -89,18 +91,29 @@ class AIProvider:
 
 
 def get_ai_provider(settings: Settings) -> AIProvider | None:
-    if settings.qwen_api_key:
+    qwen_api_key = clean_api_key(settings.qwen_api_key)
+    openai_api_key = clean_api_key(settings.openai_api_key)
+    if qwen_api_key:
         return AIProvider(
-            api_key=settings.qwen_api_key,
+            api_key=qwen_api_key,
             model=settings.qwen_model,
             base_url=settings.qwen_base_url,
             response_format={"type": "json_object"},
         )
-    if settings.openai_api_key:
+    if openai_api_key:
         return AIProvider(
-            api_key=settings.openai_api_key,
+            api_key=openai_api_key,
             model=settings.openai_model,
             base_url=None,
             response_format={"type": "json_schema", "json_schema": EVENT_SCHEMA},
         )
     return None
+
+
+def clean_api_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped.startswith("$"):
+        return None
+    return stripped

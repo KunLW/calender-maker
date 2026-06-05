@@ -9,7 +9,7 @@ from app.ai import MissingAIConfiguration, parse_event_text
 from app.config import Settings, get_settings
 from app.db import EventStore
 from app.ics import build_calendar
-from app.models import ParseRequest, ParseResponse
+from app.models import ParseRequest, ParseResponse, UpdateEventRequest
 
 
 @asynccontextmanager
@@ -65,10 +65,11 @@ def parse_event(
 @app.post("/api/events/{event_id}/confirm", response_model=ParseResponse)
 def confirm_event(
     event_id: int,
+    request: UpdateEventRequest,
     _: None = Depends(require_app_token),
     store: EventStore = Depends(get_store),
 ) -> ParseResponse:
-    event = store.confirm(event_id)
+    event = store.update_and_confirm(event_id, request)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
     return ParseResponse(event=event)
@@ -127,16 +128,22 @@ INDEX_HTML = """
       padding: 20px;
       box-shadow: 0 10px 30px rgba(32, 35, 31, 0.08);
     }
-    textarea {
+    textarea,
+    input {
       box-sizing: border-box;
       width: 100%;
-      min-height: 130px;
       resize: vertical;
       border: 1px solid #bcc5b4;
       border-radius: 6px;
       padding: 12px;
       font-size: 16px;
       line-height: 1.5;
+    }
+    textarea {
+      min-height: 130px;
+    }
+    input {
+      min-height: 44px;
     }
     button {
       border: 0;
@@ -168,17 +175,19 @@ INDEX_HTML = """
     .event.visible {
       display: grid;
     }
-    dl {
+    .form-grid {
       display: grid;
-      grid-template-columns: 80px 1fr;
-      gap: 8px 12px;
-      margin: 0;
+      gap: 12px;
     }
-    dt {
+    label {
+      display: grid;
+      gap: 6px;
       color: #677066;
+      font-size: 14px;
     }
-    dd {
-      margin: 0;
+    label span {
+      color: #20231f;
+      font-size: 16px;
     }
     .error {
       color: #a4362a;
@@ -199,13 +208,13 @@ INDEX_HTML = """
       </div>
     </section>
     <section id="eventPanel" class="panel event">
-      <dl>
-        <dt>标题</dt><dd id="title"></dd>
-        <dt>开始</dt><dd id="start"></dd>
-        <dt>结束</dt><dd id="end"></dd>
-        <dt>地点</dt><dd id="location"></dd>
-        <dt>备注</dt><dd id="description"></dd>
-      </dl>
+      <div class="form-grid">
+        <label>标题<input id="title" type="text"></label>
+        <label>开始<input id="start" type="datetime-local"></label>
+        <label>结束<input id="end" type="datetime-local"></label>
+        <label>地点<input id="location" type="text"></label>
+        <label>备注<textarea id="description"></textarea></label>
+      </div>
       <div class="actions">
         <button id="confirmBtn">确认添加</button>
         <span id="confirmStatus" class="muted"></span>
@@ -220,15 +229,38 @@ INDEX_HTML = """
     const panel = document.getElementById("eventPanel");
     const appToken = new URLSearchParams(window.location.search).get("token") || "";
     let currentEventId = null;
+    let currentTimezone = "Asia/Shanghai";
+
+    function toDatetimeLocal(value) {
+      const date = new Date(value);
+      const offsetMs = date.getTimezoneOffset() * 60000;
+      return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+    }
+
+    function fromDatetimeLocal(value) {
+      return new Date(value).toISOString();
+    }
 
     function setEvent(event) {
       currentEventId = event.id;
-      document.getElementById("title").textContent = event.title;
-      document.getElementById("start").textContent = new Date(event.start).toLocaleString();
-      document.getElementById("end").textContent = new Date(event.end).toLocaleString();
-      document.getElementById("location").textContent = event.location || "";
-      document.getElementById("description").textContent = event.description || event.source_text;
+      currentTimezone = event.timezone || currentTimezone;
+      document.getElementById("title").value = event.title;
+      document.getElementById("start").value = toDatetimeLocal(event.start);
+      document.getElementById("end").value = toDatetimeLocal(event.end);
+      document.getElementById("location").value = event.location || "";
+      document.getElementById("description").value = event.description || event.source_text;
       panel.classList.add("visible");
+    }
+
+    function readEventForm() {
+      return {
+        title: document.getElementById("title").value.trim(),
+        start: fromDatetimeLocal(document.getElementById("start").value),
+        end: fromDatetimeLocal(document.getElementById("end").value),
+        timezone: currentTimezone,
+        location: document.getElementById("location").value.trim() || null,
+        description: document.getElementById("description").value.trim() || null
+      };
     }
 
     parseBtn.addEventListener("click", async () => {
@@ -263,7 +295,8 @@ INDEX_HTML = """
       try {
         const response = await fetch(`/api/events/${currentEventId}/confirm`, {
           method: "POST",
-          headers: {"X-App-Token": appToken}
+          headers: {"Content-Type": "application/json", "X-App-Token": appToken},
+          body: JSON.stringify(readEventForm())
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "保存失败");

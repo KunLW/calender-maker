@@ -15,7 +15,7 @@ class ParsedEvent(BaseModel):
     end: datetime
     timezone: str = Field(default="Asia/Shanghai", min_length=1)
     location: str | None = Field(default=None, max_length=240)
-    description: str | None = Field(default=None, max_length=2000)
+    description: str | None = Field(default=None, max_length=4000)
 
     @field_validator("title")
     @classmethod
@@ -45,6 +45,9 @@ class ParseRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class UpdateEventRequest(ParsedEvent):
+    pass
+
+
 class ParseResponse(BaseModel):
     event: EventRecord
-
