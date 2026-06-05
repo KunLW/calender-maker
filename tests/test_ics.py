@@ -7,6 +7,7 @@ from app.models import EventRecord, EventStatus
 def test_build_calendar_escapes_text() -> None:
     event = EventRecord(
         id=1,
+        calendar_id=1,
         uid="abc@calendar-maker",
         source_text="明天吃饭",
         title="吃饭,聊天",
@@ -27,4 +28,3 @@ def test_build_calendar_escapes_text() -> None:
     assert "LOCATION:上海\\;餐厅" in content
     assert "DESCRIPTION:A\\\\B\\nC" in content
     assert "DTSTART:20260605T110000Z" in content
-

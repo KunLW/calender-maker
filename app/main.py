@@ -9,12 +9,22 @@ from app.ai import MissingAIConfiguration, parse_event_text
 from app.config import Settings, get_settings
 from app.db import EventStore
 from app.ics import build_calendar
-from app.models import ParseRequest, ParseResponse, UpdateEventRequest
+from app.models import (
+    CalendarListResponse,
+    CalendarResponse,
+    CreateCalendarRequest,
+    ParseRequest,
+    ParseResponse,
+    UpdateEventRequest,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    EventStore(get_settings().database_path).init()
+    settings = get_settings()
+    store = EventStore(settings.database_path)
+    store.init()
+    store.sync_default_calendar(settings.calendar_name, settings.calendar_token)
     yield
 
 
@@ -75,8 +85,28 @@ def parse_event(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not parse event: {exc}") from exc
 
-    event = store.create_pending(request.text, parsed)
+    try:
+        event = store.create_pending(request.text, parsed, request.calendar_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ParseResponse(event=event)
+
+
+@app.get("/api/calendars", response_model=CalendarListResponse)
+def list_calendars(
+    _: None = Depends(require_app_token),
+    store: EventStore = Depends(get_store),
+) -> CalendarListResponse:
+    return CalendarListResponse(calendars=store.list_calendars())
+
+
+@app.post("/api/calendars", response_model=CalendarResponse)
+def create_calendar(
+    request: CreateCalendarRequest,
+    _: None = Depends(require_app_token),
+    store: EventStore = Depends(get_store),
+) -> CalendarResponse:
+    return CalendarResponse(calendar=store.create_calendar(request.name))
 
 
 @app.post("/api/events/{event_id}/confirm", response_model=ParseResponse)
@@ -106,7 +136,24 @@ def calendar_feed(
 ) -> Response:
     if token != settings.calendar_token:
         raise HTTPException(status_code=401, detail="invalid calendar token")
-    content = build_calendar(store.confirmed_events(), settings.calendar_name)
+    content = build_calendar(store.confirmed_events(calendar_id=1), settings.calendar_name)
+    return Response(
+        content=content,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/calendars/{calendar_id}.ics")
+def calendar_feed_by_id(
+    calendar_id: int,
+    token: str = Query(default=""),
+    store: EventStore = Depends(get_store),
+) -> Response:
+    calendar = store.find_calendar_by_token(calendar_id, token)
+    if calendar is None:
+        raise HTTPException(status_code=401, detail="invalid calendar token")
+    content = build_calendar(store.confirmed_events(calendar_id=calendar_id), calendar.name)
     return Response(
         content=content,
         media_type="text/calendar; charset=utf-8",
@@ -192,6 +239,7 @@ INDEX_HTML = """
       gap: 10px;
       align-items: center;
       margin-top: 12px;
+      flex-wrap: wrap;
     }
     .muted {
       color: #677066;
@@ -214,6 +262,23 @@ INDEX_HTML = """
       color: #677066;
       font-size: 14px;
     }
+    select {
+      min-height: 44px;
+      border: 1px solid #bcc5b4;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 16px;
+      background: #ffffff;
+    }
+    .calendar-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .subscribe-link {
+      word-break: break-all;
+    }
     label span {
       color: #20231f;
       font-size: 16px;
@@ -233,6 +298,17 @@ INDEX_HTML = """
       <div class="muted">输入一句话，确认后写入订阅日历。</div>
       <div id="configStatus" class="muted">检查 AI 配置中...</div>
     </header>
+    <section class="panel">
+      <div class="calendar-row">
+        <label>日历<select id="calendarSelect"></select></label>
+        <label>新日历<input id="calendarName" type="text" placeholder="例如：工作、家庭、提醒"></label>
+        <button id="createCalendarBtn">创建</button>
+      </div>
+      <div class="actions">
+        <span class="muted">订阅链接</span>
+        <a id="subscribeLink" class="subscribe-link" href="#" target="_blank" rel="noreferrer"></a>
+      </div>
+    </section>
     <section class="panel">
       <textarea id="text" placeholder="例如：明天下午三点和王总开会，在腾讯会议，预计一小时"></textarea>
       <div class="actions">
@@ -257,6 +333,10 @@ INDEX_HTML = """
   <script>
     const parseBtn = document.getElementById("parseBtn");
     const confirmBtn = document.getElementById("confirmBtn");
+    const createCalendarBtn = document.getElementById("createCalendarBtn");
+    const calendarSelect = document.getElementById("calendarSelect");
+    const calendarNameInput = document.getElementById("calendarName");
+    const subscribeLink = document.getElementById("subscribeLink");
     const statusEl = document.getElementById("status");
     const confirmStatusEl = document.getElementById("confirmStatus");
     const configStatusEl = document.getElementById("configStatus");
@@ -264,6 +344,7 @@ INDEX_HTML = """
     const appToken = new URLSearchParams(window.location.search).get("token") || "";
     let currentEventId = null;
     let currentTimezone = "Asia/Shanghai";
+    let calendars = [];
     const editableFields = ["title", "start", "end", "location", "description"].map((id) => {
       return document.getElementById(id);
     });
@@ -288,6 +369,72 @@ INDEX_HTML = """
       document.getElementById("location").value = event.location || "";
       document.getElementById("description").value = event.description || event.source_text;
       panel.classList.add("visible");
+    }
+
+    function selectedCalendarId() {
+      return Number(calendarSelect.value || "1");
+    }
+
+    function selectedCalendar() {
+      return calendars.find((calendar) => calendar.id === selectedCalendarId()) || calendars[0];
+    }
+
+    function setSubscribeLink() {
+      const calendar = selectedCalendar();
+      if (!calendar) {
+        subscribeLink.textContent = "";
+        subscribeLink.removeAttribute("href");
+        return;
+      }
+      const url = `${window.location.origin}/calendars/${calendar.id}.ics?token=${encodeURIComponent(calendar.token)}`;
+      subscribeLink.href = url;
+      subscribeLink.textContent = url;
+    }
+
+    function renderCalendars() {
+      calendarSelect.innerHTML = "";
+      calendars.forEach((calendar) => {
+        const option = document.createElement("option");
+        option.value = String(calendar.id);
+        option.textContent = calendar.name;
+        calendarSelect.appendChild(option);
+      });
+      setSubscribeLink();
+    }
+
+    async function loadCalendars() {
+      const response = await fetch("/api/calendars", {
+        headers: {"X-App-Token": appToken}
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "日历加载失败");
+      calendars = data.calendars;
+      renderCalendars();
+    }
+
+    async function createCalendar() {
+      const name = calendarNameInput.value.trim();
+      if (!name) return;
+      createCalendarBtn.disabled = true;
+      try {
+        const response = await fetch("/api/calendars", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-App-Token": appToken},
+          body: JSON.stringify({name})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "创建失败");
+        calendars.push(data.calendar);
+        renderCalendars();
+        calendarSelect.value = String(data.calendar.id);
+        calendarNameInput.value = "";
+        setSubscribeLink();
+      } catch (error) {
+        statusEl.textContent = error.message;
+        statusEl.className = "muted error";
+      } finally {
+        createCalendarBtn.disabled = false;
+      }
     }
 
     function setEditorLocked(locked) {
@@ -327,6 +474,13 @@ INDEX_HTML = """
     }
 
     loadConfigStatus();
+    loadCalendars().catch((error) => {
+      statusEl.textContent = error.message;
+      statusEl.className = "muted error";
+    });
+
+    calendarSelect.addEventListener("change", setSubscribeLink);
+    createCalendarBtn.addEventListener("click", createCalendar);
 
     parseBtn.addEventListener("click", async () => {
       const text = document.getElementById("text").value.trim();
@@ -340,7 +494,7 @@ INDEX_HTML = """
         const response = await fetch("/api/parse", {
           method: "POST",
           headers: {"Content-Type": "application/json", "X-App-Token": appToken},
-          body: JSON.stringify({text})
+          body: JSON.stringify({text, calendar_id: selectedCalendarId()})
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "解析失败");
