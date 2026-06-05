@@ -8,6 +8,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
+    qwen_api_key: str | None = Field(default=None, alias="QWEN_API_KEY")
+    qwen_model: str = Field(default="qwen-plus", alias="QWEN_MODEL")
+    qwen_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        alias="QWEN_BASE_URL",
+    )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
     app_timezone: str = Field(default="Asia/Shanghai", alias="APP_TIMEZONE")

@@ -38,7 +38,15 @@ http://127.0.0.1:8000/calendar.ics?token=change-me
 
 见 `.env.example`。
 
-第一版需要设置 `OPENAI_API_KEY` 才能进行 AI 解析。`CALENDAR_TOKEN` 用来保护 `.ics` 订阅地址，请部署时改成随机字符串。
+第一版优先读取 `QWEN_API_KEY` 调用 Qwen。也保留 `OPENAI_API_KEY` 作为备用。`CALENDAR_TOKEN` 用来保护 `.ics` 订阅地址，请部署时改成随机字符串。
+
+Qwen 配置示例：
+
+```env
+QWEN_API_KEY=sk-...
+QWEN_MODEL=qwen-plus
+QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+```
 
 如果部署在公网，建议同时设置 `APP_TOKEN`。设置后网页使用：
 
