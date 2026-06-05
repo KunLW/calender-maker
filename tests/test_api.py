@@ -69,3 +69,55 @@ def test_parse_confirm_and_calendar_feed(tmp_path, monkeypatch) -> None:
             assert "DESCRIPTION:保留更完整的备注" in feed.text
     finally:
         main.app.dependency_overrides.clear()
+
+
+def test_config_status_reports_qwen_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("QWEN_API_KEY", "system-qwen-key")
+    settings = Settings(
+        DATABASE_PATH=str(tmp_path / "calendar.db"),
+        CALENDAR_TOKEN="calendar-secret",
+        QWEN_API_KEY="$QWEN_API_KEY",
+    )
+    store = EventStore(settings.database_path)
+    store.init()
+    main.app.dependency_overrides[main.get_settings] = lambda: settings
+    main.app.dependency_overrides[main.get_store] = lambda: store
+
+    try:
+        with TestClient(main.app) as client:
+            response = client.get("/api/config/status")
+            assert response.status_code == 200
+            assert response.json() == {
+                "ai_provider": "qwen",
+                "api_key_configured": True,
+                "model": "qwen-plus",
+            }
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_config_status_reports_missing_key(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = Settings(
+        DATABASE_PATH=str(tmp_path / "calendar.db"),
+        CALENDAR_TOKEN="calendar-secret",
+        QWEN_API_KEY="$QWEN_API_KEY",
+        OPENAI_API_KEY="",
+    )
+    store = EventStore(settings.database_path)
+    store.init()
+    main.app.dependency_overrides[main.get_settings] = lambda: settings
+    main.app.dependency_overrides[main.get_store] = lambda: store
+
+    try:
+        with TestClient(main.app) as client:
+            response = client.get("/api/config/status")
+            assert response.status_code == 200
+            assert response.json() == {
+                "ai_provider": None,
+                "api_key_configured": False,
+                "model": None,
+            }
+    finally:
+        main.app.dependency_overrides.clear()

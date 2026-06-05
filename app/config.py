@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from zoneinfo import ZoneInfo
 
 from pydantic import Field
@@ -26,7 +27,24 @@ class Settings(BaseSettings):
     def timezone(self) -> ZoneInfo:
         return ZoneInfo(self.app_timezone)
 
+    @property
+    def effective_qwen_api_key(self) -> str | None:
+        return clean_env_value(os.environ.get("QWEN_API_KEY") or self.qwen_api_key)
+
+    @property
+    def effective_openai_api_key(self) -> str | None:
+        return clean_env_value(os.environ.get("OPENAI_API_KEY") or self.openai_api_key)
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def clean_env_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    expanded = os.path.expandvars(value.strip()).strip()
+    if not expanded or expanded.startswith("$"):
+        return None
+    return expanded

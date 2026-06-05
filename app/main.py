@@ -44,6 +44,23 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/config/status")
+def config_status(settings: Settings = Depends(get_settings)) -> dict[str, str | bool | None]:
+    provider_name = None
+    model = None
+    if settings.effective_qwen_api_key:
+        provider_name = "qwen"
+        model = settings.qwen_model
+    elif settings.effective_openai_api_key:
+        provider_name = "openai"
+        model = settings.openai_model
+    return {
+        "ai_provider": provider_name,
+        "api_key_configured": provider_name is not None,
+        "model": model,
+    }
+
+
 @app.post("/api/parse", response_model=ParseResponse)
 def parse_event(
     request: ParseRequest,
@@ -192,6 +209,9 @@ INDEX_HTML = """
     .error {
       color: #a4362a;
     }
+    .ok {
+      color: #1f6f61;
+    }
   </style>
 </head>
 <body>
@@ -199,6 +219,7 @@ INDEX_HTML = """
     <header>
       <h1>Calendar Maker</h1>
       <div class="muted">输入一句话，确认后写入订阅日历。</div>
+      <div id="configStatus" class="muted">检查 AI 配置中...</div>
     </header>
     <section class="panel">
       <textarea id="text" placeholder="例如：明天下午三点和王总开会，在腾讯会议，预计一小时"></textarea>
@@ -226,6 +247,7 @@ INDEX_HTML = """
     const confirmBtn = document.getElementById("confirmBtn");
     const statusEl = document.getElementById("status");
     const confirmStatusEl = document.getElementById("confirmStatus");
+    const configStatusEl = document.getElementById("configStatus");
     const panel = document.getElementById("eventPanel");
     const appToken = new URLSearchParams(window.location.search).get("token") || "";
     let currentEventId = null;
@@ -262,6 +284,26 @@ INDEX_HTML = """
         description: document.getElementById("description").value.trim() || null
       };
     }
+
+    async function loadConfigStatus() {
+      try {
+        const response = await fetch("/api/config/status");
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "配置检查失败");
+        if (data.api_key_configured) {
+          configStatusEl.textContent = `AI 已配置：${data.ai_provider} / ${data.model}`;
+          configStatusEl.className = "muted ok";
+        } else {
+          configStatusEl.textContent = "AI 未配置：请在启动服务前设置 QWEN_API_KEY，或写入 .env";
+          configStatusEl.className = "muted error";
+        }
+      } catch (error) {
+        configStatusEl.textContent = error.message;
+        configStatusEl.className = "muted error";
+      }
+    }
+
+    loadConfigStatus();
 
     parseBtn.addEventListener("click", async () => {
       const text = document.getElementById("text").value.trim();

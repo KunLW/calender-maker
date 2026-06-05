@@ -47,7 +47,10 @@ class MissingAIConfiguration(RuntimeError):
 def parse_event_text(text: str, settings: Settings) -> ParsedEvent:
     provider = get_ai_provider(settings)
     if provider is None:
-        raise MissingAIConfiguration("QWEN_API_KEY or OPENAI_API_KEY is not configured")
+        raise MissingAIConfiguration(
+            "QWEN_API_KEY is not visible to this running service. "
+            "Set it before starting uvicorn, or put it in .env."
+        )
 
     now = datetime.now(settings.timezone)
     client = OpenAI(api_key=provider.api_key, base_url=provider.base_url)
@@ -91,8 +94,8 @@ class AIProvider:
 
 
 def get_ai_provider(settings: Settings) -> AIProvider | None:
-    qwen_api_key = clean_api_key(settings.qwen_api_key)
-    openai_api_key = clean_api_key(settings.openai_api_key)
+    qwen_api_key = settings.effective_qwen_api_key
+    openai_api_key = settings.effective_openai_api_key
     if qwen_api_key:
         return AIProvider(
             api_key=qwen_api_key,
@@ -108,12 +111,3 @@ def get_ai_provider(settings: Settings) -> AIProvider | None:
             response_format={"type": "json_schema", "json_schema": EVENT_SCHEMA},
         )
     return None
-
-
-def clean_api_key(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    if not stripped or stripped.startswith("$"):
-        return None
-    return stripped
