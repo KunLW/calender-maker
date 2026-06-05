@@ -90,12 +90,12 @@ class EventStore:
     def update_and_confirm(self, event_id: int, event: ParsedEvent) -> EventRecord | None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE events
                 SET title = ?, start = ?, end = ?, timezone = ?, location = ?,
                     description = ?, status = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = ?
                 """,
                 (
                     event.title,
@@ -107,8 +107,11 @@ class EventStore:
                     EventStatus.confirmed.value,
                     now,
                     event_id,
+                    EventStatus.pending.value,
                 ),
             )
+            if cursor.rowcount == 0:
+                return None
         return self.get(event_id)
 
     def confirmed_events(self) -> list[EventRecord]:

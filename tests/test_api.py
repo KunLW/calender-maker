@@ -63,9 +63,25 @@ def test_parse_confirm_and_calendar_feed(tmp_path, monkeypatch) -> None:
             assert confirmed.json()["event"]["status"] == "confirmed"
             assert confirmed.json()["event"]["title"] == "修改后的会议"
 
+            duplicate = client.post(
+                f"/api/events/{event_id}/confirm",
+                headers={"X-App-Token": "app-secret"},
+                json={
+                    "title": "不应再次添加",
+                    "start": parsed_event["start"],
+                    "end": parsed_event["end"],
+                    "timezone": parsed_event["timezone"],
+                    "location": "会议室 B",
+                    "description": "重复提交",
+                },
+            )
+            assert duplicate.status_code == 409
+            assert duplicate.json()["detail"] == "event already confirmed"
+
             feed = client.get("/calendar.ics?token=calendar-secret")
             assert feed.status_code == 200
             assert "SUMMARY:修改后的会议" in feed.text
+            assert "SUMMARY:不应再次添加" not in feed.text
             assert "DESCRIPTION:保留更完整的备注" in feed.text
     finally:
         main.app.dependency_overrides.clear()

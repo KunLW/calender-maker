@@ -86,9 +86,15 @@ def confirm_event(
     _: None = Depends(require_app_token),
     store: EventStore = Depends(get_store),
 ) -> ParseResponse:
+    existing = store.get(event_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    if existing.status != "pending":
+        raise HTTPException(status_code=409, detail="event already confirmed")
+
     event = store.update_and_confirm(event_id, request)
     if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
+        raise HTTPException(status_code=409, detail="event could not be confirmed")
     return ParseResponse(event=event)
 
 
@@ -175,6 +181,12 @@ INDEX_HTML = """
       cursor: not-allowed;
       opacity: 0.6;
     }
+    input:disabled,
+    textarea:disabled {
+      background: #f1f3ee;
+      color: #677066;
+      cursor: not-allowed;
+    }
     .actions {
       display: flex;
       gap: 10px;
@@ -252,6 +264,9 @@ INDEX_HTML = """
     const appToken = new URLSearchParams(window.location.search).get("token") || "";
     let currentEventId = null;
     let currentTimezone = "Asia/Shanghai";
+    const editableFields = ["title", "start", "end", "location", "description"].map((id) => {
+      return document.getElementById(id);
+    });
 
     function toDatetimeLocal(value) {
       const date = new Date(value);
@@ -266,12 +281,20 @@ INDEX_HTML = """
     function setEvent(event) {
       currentEventId = event.id;
       currentTimezone = event.timezone || currentTimezone;
+      setEditorLocked(false);
       document.getElementById("title").value = event.title;
       document.getElementById("start").value = toDatetimeLocal(event.start);
       document.getElementById("end").value = toDatetimeLocal(event.end);
       document.getElementById("location").value = event.location || "";
       document.getElementById("description").value = event.description || event.source_text;
       panel.classList.add("visible");
+    }
+
+    function setEditorLocked(locked) {
+      editableFields.forEach((field) => {
+        field.disabled = locked;
+      });
+      confirmBtn.disabled = locked;
     }
 
     function readEventForm() {
@@ -309,6 +332,7 @@ INDEX_HTML = """
       const text = document.getElementById("text").value.trim();
       if (!text) return;
       parseBtn.disabled = true;
+      setEditorLocked(false);
       statusEl.textContent = "解析中...";
       statusEl.className = "muted";
       confirmStatusEl.textContent = "";
@@ -343,6 +367,9 @@ INDEX_HTML = """
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "保存失败");
         confirmStatusEl.textContent = "已添加到订阅日历";
+        setEditorLocked(true);
+        document.getElementById("text").value = "";
+        statusEl.textContent = "可以继续输入下一条";
       } catch (error) {
         confirmStatusEl.textContent = error.message;
         confirmStatusEl.className = "muted error";
