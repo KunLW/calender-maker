@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     app_token: str | None = Field(default=None, alias="APP_TOKEN")
     calendar_token: str = Field(default="change-me", alias="CALENDAR_TOKEN")
     calendar_name: str = Field(default="AI Calendar", alias="CALENDAR_NAME")
+    canonical_origin: str = Field(
+        default="https://quantumman.tech",
+        alias="CANONICAL_ORIGIN",
+    )
+    session_cookie_secure: bool = Field(default=False, alias="SESSION_COOKIE_SECURE")
+    session_days: int = Field(default=30, alias="SESSION_DAYS", ge=1, le=365)
 
     @property
     def timezone(self) -> ZoneInfo:
