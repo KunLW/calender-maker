@@ -7,6 +7,7 @@ from app.models import EventRecord, EventStatus
 def test_build_calendar_escapes_text() -> None:
     event = EventRecord(
         id=1,
+        user_id=1,
         calendar_id=1,
         uid="abc@calendar-maker",
         source_text="明天吃饭",
