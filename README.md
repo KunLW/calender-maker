@@ -1,78 +1,131 @@
 # Calendar Maker
 
-把一句自然语言转成可订阅的 `.ics` 日历。
+Turn a natural-language sentence into an editable calendar event, let AI recommend the best calendar, then publish confirmed events through private ICS subscriptions.
 
-## 功能
+## Features
 
-- 网页输入一句话
-- 调用 AI 返回结构化日历事件
-- Pydantic 校验 AI 输出
-- 用户确认后保存到 SQLite
-- 通过 `/calendar.ics` 输出订阅日历
-- 支持创建多个日历，并为每个日历生成独立订阅链接
+- Invite-only email/password accounts
+- Argon2 password hashing and server-side cookie sessions
+- Strict per-user ownership for calendars and events
+- Qwen/OpenAI-compatible structured event parsing
+- AI calendar recommendations and proposed new calendars
+- Editable event confirmation with duplicate-submit protection
+- Agenda view across all calendars with edit and delete
+- Calendar colors and descriptions
+- Per-calendar and combined ICS feeds
+- Apple Calendar `webcal://` links and copyable HTTPS links
+- Revocable subscription tokens
 
-## 快速开始
+## Local Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m app.admin create-invite
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-打开：
+Open `http://127.0.0.1:8000/register` and register with the generated single-use invite code.
 
-```text
-http://127.0.0.1:8000/
-```
+## Configuration
 
-订阅地址：
-
-```text
-http://127.0.0.1:8000/calendar.ics?token=change-me
-```
-
-页面会显示当前选中日历的订阅链接。创建新日历后，请复制对应的新链接到系统日历里订阅。
-
-部署到 ECS 后，把 `127.0.0.1` 换成公网 IP 或域名。
-
-## 配置
-
-见 `.env.example`。
-
-第一版优先读取 `QWEN_API_KEY` 调用 Qwen。也保留 `OPENAI_API_KEY` 作为备用。`CALENDAR_TOKEN` 用来保护 `.ics` 订阅地址，请部署时改成随机字符串。
-
-Qwen 配置示例。推荐本地开发直接在 `.env` 填真实 key，线上部署用进程环境变量或 systemd `EnvironmentFile`：
+Important settings:
 
 ```env
-QWEN_API_KEY=sk-...
+QWEN_API_KEY=
 QWEN_MODEL=qwen-plus
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+APP_TIMEZONE=Asia/Shanghai
+DATABASE_PATH=data/calendar.db
+CANONICAL_ORIGIN=https://quantumman.tech
+SESSION_COOKIE_SECURE=false
+SESSION_DAYS=30
 ```
 
-页面会通过 `/api/config/status` 显示当前服务是否能看到 AI key。注意环境变量必须在启动服务前存在，服务运行后再 `export QWEN_API_KEY=...` 不会影响已运行进程。
+Set `SESSION_COOKIE_SECURE=true` in production after HTTPS is operational. Environment variables take precedence over `.env`.
 
-## 多日历
+## Accounts and Invites
 
-首页可以创建多个日历，例如“工作”“家庭”“提醒”。解析事件前先选择目标日历，确认后事件只会进入该日历的 `.ics` feed。
+Generate an invite from the deployment directory:
 
-接口：
+```bash
+.venv/bin/python -m app.admin create-invite
+```
+
+Each code can register one account. The first registered account atomically claims calendars and events created by the previous single-user version. Later accounts receive a new default calendar.
+
+Sessions are stored server-side. The browser only receives an opaque `HttpOnly` session cookie.
+
+## Pages
+
+- `/` — AI event creation and confirmation
+- `/agenda` — combined agenda with calendar filters, editing, and deletion
+- `/calendars` — calendar metadata and subscription management
+- `/login` and `/register` — account access
+
+## Subscriptions
+
+Each calendar exposes:
 
 ```text
-GET /api/calendars
-POST /api/calendars
-GET /calendars/{calendar_id}.ics?token=...
+https://quantumman.tech/calendars/{calendar_id}.ics?token=...
+webcal://quantumman.tech/calendars/{calendar_id}.ics?token=...
 ```
 
-如果部署在公网，建议同时设置 `APP_TOKEN`。设置后网页使用：
+Each user also has a combined feed:
 
 ```text
-http://127.0.0.1:8000/?token=your-app-token
+https://quantumman.tech/feeds/all.ics?token=...
+webcal://quantumman.tech/feeds/all.ics?token=...
 ```
 
-## 测试
+Tokens are visible only from the authenticated calendar-management page and can be regenerated to invalidate old links.
+
+## Database Migration
+
+Startup applies additive SQLite migrations for users, sessions, invite codes, ownership, calendar colors, and descriptions. Before the first user migration, the application creates:
+
+```text
+data/calendar.db.pre-users.bak
+```
+
+Keep this backup until the first account has registered and legacy ownership has been verified.
+
+## Tests
 
 ```bash
 pytest
 ```
+
+Coverage includes invite consumption, Argon2 hashing, session lookup, user isolation, AI recommendation validation, event confirmation, agenda operations, ICS isolation, webcal/HTTPS URLs, and token regeneration.
+
+## ECS Deployment
+
+Update using Git rather than copying files:
+
+```bash
+cd /opt/calendar_maker
+git pull --ff-only origin main
+source .venv/bin/activate
+pip install -r requirements.txt
+pytest
+systemctl restart calendar-maker
+```
+
+Production `.env` additions:
+
+```env
+CANONICAL_ORIGIN=https://quantumman.tech
+SESSION_COOKIE_SECURE=true
+```
+
+Then generate the first invite:
+
+```bash
+cd /opt/calendar_maker
+.venv/bin/python -m app.admin create-invite
+```
+
+The existing Nginx Proxy Manager should forward the domain to the application. HTTPS must be functioning before Apple Calendar subscription links are used.

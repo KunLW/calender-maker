@@ -208,3 +208,26 @@ def test_token_regeneration_invalidates_old_feed(tmp_path, monkeypatch) -> None:
     finally:
         teardown_app()
 
+
+def test_login_logout_and_invalid_credentials(tmp_path, monkeypatch) -> None:
+    _, store = make_app(tmp_path, monkeypatch)
+    try:
+        with TestClient(main.app) as client:
+            register(client, store, "owner@example.com")
+            assert client.post("/api/auth/logout").status_code == 204
+            assert client.get("/api/auth/me").status_code == 401
+
+            invalid = client.post(
+                "/api/auth/login",
+                json={"email": "owner@example.com", "password": "wrong"},
+            )
+            assert invalid.status_code == 401
+
+            valid = client.post(
+                "/api/auth/login",
+                json={"email": "owner@example.com", "password": "strong-password"},
+            )
+            assert valid.status_code == 200
+            assert client.get("/api/auth/me").json()["user"]["email"] == "owner@example.com"
+    finally:
+        teardown_app()

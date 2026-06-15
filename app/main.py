@@ -72,9 +72,10 @@ def set_session_cookie(
 
 def subscription_urls(settings: Settings, path: str) -> SubscriptionResponse:
     https_url = f"{settings.canonical_origin.rstrip('/')}{path}"
+    webcal_url = https_url.split("://", 1)[-1]
     return SubscriptionResponse(
         https_url=https_url,
-        webcal_url=https_url.replace("https://", "webcal://", 1),
+        webcal_url=f"webcal://{webcal_url}",
     )
 
 
@@ -156,6 +157,7 @@ def logout(
     if token:
         store.delete_session(hash_token(token))
     response.delete_cookie(SESSION_COOKIE, path="/")
+    response.status_code = 204
     return response
 
 
