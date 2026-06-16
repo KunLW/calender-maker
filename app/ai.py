@@ -6,7 +6,7 @@ from datetime import datetime
 from openai import OpenAI
 
 from app.config import Settings
-from app.models import ParsedEvent
+from app.models import AIParsedEvent, CALENDAR_COLORS, CalendarRecord
 
 
 EVENT_SCHEMA = {
@@ -22,21 +22,50 @@ EVENT_SCHEMA = {
             "timezone": {"type": "string"},
             "location": {"type": ["string", "null"]},
             "description": {"type": ["string", "null"]},
+            "recommended_calendar_id": {"type": ["integer", "null"]},
+            "recommendation_reason": {"type": "string"},
+            "recommendation_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "proposed_calendar": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string"},
+                            "color": {"type": "string", "enum": list(CALENDAR_COLORS)},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["name", "color", "description"],
+                    },
+                    {"type": "null"},
+                ]
+            },
         },
-        "required": ["title", "start", "end", "timezone", "location", "description"],
+        "required": [
+            "title",
+            "start",
+            "end",
+            "timezone",
+            "location",
+            "description",
+            "recommended_calendar_id",
+            "recommendation_reason",
+            "recommendation_confidence",
+            "proposed_calendar",
+        ],
     },
 }
 
 JSON_INSTRUCTIONS = (
-    "你是日历事件解析器。只抽取用户明确表达或强烈暗示的单个日程。"
-    "必须返回 JSON，且只能返回 JSON 对象，不要返回 Markdown。"
-    "JSON 字段必须是：title, start, end, timezone, location, description。"
-    "start 和 end 必须是带时区偏移的 ISO 8601 date-time 字符串。"
-    "location 和 description 不存在时返回 null。"
-    "description 要尽量完整保留用户输入里的背景、参与人、链接、地点细节、提醒事项、"
-    "推断依据和默认时长；如果做了默认时长推断，要写明。"
-    "如果用户没有说结束时间，根据事件类型选择合理默认时长：会议 1 小时，吃饭 1.5 小时，"
-    "提醒/待办 30 分钟。不要编造地点。"
+    "You convert one natural-language request into one calendar event. "
+    "Return only a JSON object with title, start, end, timezone, location, description, "
+    "recommended_calendar_id, recommendation_reason, recommendation_confidence, and "
+    "proposed_calendar. Times must be ISO 8601 with timezone offsets. Preserve useful context, "
+    "participants, links, constraints, reminders, and any inferred duration in description. "
+    "If no end time is given, use a sensible duration: meeting 1 hour, meal 1.5 hours, reminder "
+    "or task 30 minutes. Do not invent a location. Recommend only an ID from AVAILABLE_CALENDARS. "
+    "If none fits with confidence of at least 0.55, set recommended_calendar_id to null and propose "
+    "a new calendar with a concise name, one allowed color, and a useful description."
 )
 
 
@@ -44,7 +73,11 @@ class MissingAIConfiguration(RuntimeError):
     pass
 
 
-def parse_event_text(text: str, settings: Settings) -> ParsedEvent:
+def parse_event_text(
+    text: str,
+    settings: Settings,
+    calendars: list[CalendarRecord],
+) -> AIParsedEvent:
     provider = get_ai_provider(settings)
     if provider is None:
         raise MissingAIConfiguration(
@@ -53,21 +86,28 @@ def parse_event_text(text: str, settings: Settings) -> ParsedEvent:
         )
 
     now = datetime.now(settings.timezone)
+    available = [
+        {
+            "id": calendar.id,
+            "name": calendar.name,
+            "color": calendar.color,
+            "description": calendar.description,
+        }
+        for calendar in calendars
+    ]
     client = OpenAI(api_key=provider.api_key, base_url=provider.base_url)
     response = client.chat.completions.create(
         model=provider.model,
         response_format=provider.response_format,
         messages=[
-            {
-                "role": "system",
-                "content": JSON_INSTRUCTIONS,
-            },
+            {"role": "system", "content": JSON_INSTRUCTIONS},
             {
                 "role": "user",
                 "content": (
-                    f"当前时间：{now.isoformat()}\n"
-                    f"默认时区：{settings.app_timezone}\n"
-                    f"用户输入：{text}"
+                    f"CURRENT_TIME: {now.isoformat()}\n"
+                    f"DEFAULT_TIMEZONE: {settings.app_timezone}\n"
+                    f"AVAILABLE_CALENDARS: {json.dumps(available, ensure_ascii=False)}\n"
+                    f"USER_INPUT: {text}"
                 ),
             },
         ],
@@ -75,7 +115,13 @@ def parse_event_text(text: str, settings: Settings) -> ParsedEvent:
     content = response.choices[0].message.content
     if content is None:
         raise ValueError("AI response was empty")
-    return ParsedEvent.model_validate(json.loads(content))
+    parsed = AIParsedEvent.model_validate(json.loads(content))
+    calendar_ids = {calendar.id for calendar in calendars}
+    if parsed.recommended_calendar_id not in calendar_ids:
+        parsed.recommended_calendar_id = None
+    if parsed.recommended_calendar_id is not None:
+        parsed.proposed_calendar = None
+    return parsed
 
 
 class AIProvider:

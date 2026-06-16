@@ -1,52 +1,107 @@
 from __future__ import annotations
 
+import shutil
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse
 
 from app.ai import MissingAIConfiguration, parse_event_text
+from app.auth import (
+    SESSION_COOKIE,
+    get_store,
+    hash_password,
+    hash_token,
+    new_token,
+    require_user,
+    session_expiry,
+    verify_password,
+)
 from app.config import Settings, get_settings
 from app.db import EventStore
 from app.ics import build_calendar
 from app.models import (
+    AgendaResponse,
+    AuthResponse,
     CalendarListResponse,
     CalendarResponse,
     CreateCalendarRequest,
+    LoginRequest,
     ParseRequest,
     ParseResponse,
+    RegisterRequest,
+    SubscriptionResponse,
+    UpdateCalendarRequest,
     UpdateEventRequest,
+    UserPublic,
+    UserRecord,
 )
+from app.pages import agenda_page, calendars_page, login_page, maker_page, register_page
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
-    store = EventStore(settings.database_path)
-    store.init()
-    store.sync_default_calendar(settings.calendar_name, settings.calendar_token)
+    database = Path(settings.database_path)
+    if database.exists() and not database.with_suffix(database.suffix + ".pre-users.bak").exists():
+        shutil.copy2(database, database.with_suffix(database.suffix + ".pre-users.bak"))
+    EventStore(settings.database_path).init()
     yield
 
 
 app = FastAPI(title="Calendar Maker", lifespan=lifespan)
 
 
-def get_store(settings: Settings = Depends(get_settings)) -> EventStore:
-    return EventStore(settings.database_path)
-
-
-def require_app_token(
-    token: str = Query(default=""),
-    x_app_token: str = Header(default=""),
-    settings: Settings = Depends(get_settings),
+def set_session_cookie(
+    response: Response,
+    token: str,
+    settings: Settings,
 ) -> None:
-    if settings.app_token and token != settings.app_token and x_app_token != settings.app_token:
-        raise HTTPException(status_code=401, detail="invalid app token")
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=settings.session_days * 24 * 60 * 60,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def subscription_urls(settings: Settings, path: str) -> SubscriptionResponse:
+    https_url = f"{settings.canonical_origin.rstrip('/')}{path}"
+    webcal_url = https_url.split("://", 1)[-1]
+    return SubscriptionResponse(
+        https_url=https_url,
+        webcal_url=f"webcal://{webcal_url}",
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_view() -> str:
+    return login_page()
+
+
+@app.get("/register", response_class=HTMLResponse)
+def register_view() -> str:
+    return register_page()
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return INDEX_HTML
+def maker_view() -> str:
+    return maker_page()
+
+
+@app.get("/agenda", response_class=HTMLResponse)
+def agenda_view() -> str:
+    return agenda_page()
+
+
+@app.get("/calendars", response_class=HTMLResponse)
+def calendars_view() -> str:
+    return calendars_page()
 
 
 @app.get("/health")
@@ -54,8 +109,68 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/auth/register", response_model=AuthResponse)
+def register(
+    request: RegisterRequest,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    store: EventStore = Depends(get_store),
+) -> AuthResponse:
+    try:
+        user = store.register_user(
+            str(request.email),
+            hash_password(request.password),
+            request.invite_code,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    token = new_token()
+    store.create_session(user.id, hash_token(token), session_expiry(settings))
+    set_session_cookie(response, token, settings)
+    return AuthResponse(user=UserPublic(id=user.id, email=user.email))
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+def login(
+    request: LoginRequest,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    store: EventStore = Depends(get_store),
+) -> AuthResponse:
+    credentials = store.get_user_credentials(str(request.email))
+    if credentials is None or not verify_password(credentials["password_hash"], request.password):
+        raise HTTPException(status_code=401, detail="invalid email or password")
+    user = store.get_user(credentials["id"])
+    token = new_token()
+    store.create_session(user.id, hash_token(token), session_expiry(settings))
+    set_session_cookie(response, token, settings)
+    return AuthResponse(user=UserPublic(id=user.id, email=user.email))
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(
+    request: Request,
+    response: Response,
+    store: EventStore = Depends(get_store),
+) -> Response:
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        store.delete_session(hash_token(token))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.status_code = 204
+    return response
+
+
+@app.get("/api/auth/me", response_model=AuthResponse)
+def me(user: UserRecord = Depends(require_user)) -> AuthResponse:
+    return AuthResponse(user=UserPublic(id=user.id, email=user.email))
+
+
 @app.get("/api/config/status")
-def config_status(settings: Settings = Depends(get_settings)) -> dict[str, str | bool | None]:
+def config_status(
+    _: UserRecord = Depends(require_user),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str | bool | None]:
     provider_name = None
     model = None
     if settings.effective_qwen_api_key:
@@ -74,78 +189,207 @@ def config_status(settings: Settings = Depends(get_settings)) -> dict[str, str |
 @app.post("/api/parse", response_model=ParseResponse)
 def parse_event(
     request: ParseRequest,
-    _: None = Depends(require_app_token),
+    user: UserRecord = Depends(require_user),
     settings: Settings = Depends(get_settings),
     store: EventStore = Depends(get_store),
 ) -> ParseResponse:
+    calendars = store.list_calendars(user.id)
+    if not calendars:
+        raise HTTPException(status_code=409, detail="create a calendar first")
     try:
-        parsed = parse_event_text(request.text, settings)
+        parsed = parse_event_text(request.text, settings, calendars)
     except MissingAIConfiguration as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not parse event: {exc}") from exc
 
-    try:
-        event = store.create_pending(request.text, parsed, request.calendar_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return ParseResponse(event=event)
+    calendar_ids = {calendar.id for calendar in calendars}
+    selected_id = request.preferred_calendar_id if request.preferred_calendar_id in calendar_ids else None
+    selected_id = selected_id or parsed.recommended_calendar_id or calendars[0].id
+    event = store.create_pending(user.id, request.text, parsed, selected_id)
+    return ParseResponse(
+        event=event,
+        recommended_calendar_id=parsed.recommended_calendar_id,
+        recommendation_reason=parsed.recommendation_reason,
+        recommendation_confidence=parsed.recommendation_confidence,
+        proposed_calendar=parsed.proposed_calendar,
+    )
 
 
 @app.get("/api/calendars", response_model=CalendarListResponse)
 def list_calendars(
-    _: None = Depends(require_app_token),
+    user: UserRecord = Depends(require_user),
     store: EventStore = Depends(get_store),
 ) -> CalendarListResponse:
-    return CalendarListResponse(calendars=store.list_calendars())
+    return CalendarListResponse(calendars=store.list_calendars(user.id))
+
+
+@app.get("/api/calendars/manage", response_model=CalendarListResponse)
+def manage_calendars(
+    user: UserRecord = Depends(require_user),
+    store: EventStore = Depends(get_store),
+) -> CalendarListResponse:
+    return CalendarListResponse(calendars=store.list_calendars(user.id, include_tokens=True))
 
 
 @app.post("/api/calendars", response_model=CalendarResponse)
 def create_calendar(
     request: CreateCalendarRequest,
-    _: None = Depends(require_app_token),
+    user: UserRecord = Depends(require_user),
     store: EventStore = Depends(get_store),
 ) -> CalendarResponse:
-    return CalendarResponse(calendar=store.create_calendar(request.name))
+    return CalendarResponse(
+        calendar=store.create_calendar(
+            user.id,
+            request.name,
+            request.color,
+            request.description,
+        )
+    )
+
+
+@app.patch("/api/calendars/{calendar_id}", response_model=CalendarResponse)
+def update_calendar(
+    calendar_id: int,
+    request: UpdateCalendarRequest,
+    user: UserRecord = Depends(require_user),
+    store: EventStore = Depends(get_store),
+) -> CalendarResponse:
+    calendar = store.update_calendar(
+        user.id,
+        calendar_id,
+        request.name,
+        request.color,
+        request.description,
+    )
+    if calendar is None:
+        raise HTTPException(status_code=404, detail="calendar not found")
+    return CalendarResponse(calendar=calendar)
+
+
+@app.post("/api/calendars/{calendar_id}/regenerate-token", response_model=CalendarResponse)
+def regenerate_calendar_token(
+    calendar_id: int,
+    user: UserRecord = Depends(require_user),
+    store: EventStore = Depends(get_store),
+) -> CalendarResponse:
+    calendar = store.regenerate_calendar_token(user.id, calendar_id)
+    if calendar is None:
+        raise HTTPException(status_code=404, detail="calendar not found")
+    return CalendarResponse(calendar=calendar)
+
+
+@app.get("/api/calendars/{calendar_id}/subscription", response_model=SubscriptionResponse)
+def calendar_subscription(
+    calendar_id: int,
+    user: UserRecord = Depends(require_user),
+    settings: Settings = Depends(get_settings),
+    store: EventStore = Depends(get_store),
+) -> SubscriptionResponse:
+    calendar = store.get_calendar(user.id, calendar_id, include_token=True)
+    if calendar is None:
+        raise HTTPException(status_code=404, detail="calendar not found")
+    return subscription_urls(settings, f"/calendars/{calendar.id}.ics?token={calendar.token}")
+
+
+@app.get("/api/feeds/all/subscription", response_model=SubscriptionResponse)
+def all_subscription(
+    user: UserRecord = Depends(require_user),
+    settings: Settings = Depends(get_settings),
+) -> SubscriptionResponse:
+    return subscription_urls(settings, f"/feeds/all.ics?token={user.all_feed_token}")
+
+
+@app.post("/api/feeds/all/regenerate-token", response_model=SubscriptionResponse)
+def regenerate_all_feed(
+    user: UserRecord = Depends(require_user),
+    settings: Settings = Depends(get_settings),
+    store: EventStore = Depends(get_store),
+) -> SubscriptionResponse:
+    updated = store.regenerate_all_feed_token(user.id)
+    return subscription_urls(settings, f"/feeds/all.ics?token={updated.all_feed_token}")
 
 
 @app.post("/api/events/{event_id}/confirm", response_model=ParseResponse)
 def confirm_event(
     event_id: int,
     request: UpdateEventRequest,
-    _: None = Depends(require_app_token),
+    user: UserRecord = Depends(require_user),
     store: EventStore = Depends(get_store),
 ) -> ParseResponse:
-    existing = store.get(event_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    if existing.status != "pending":
-        raise HTTPException(status_code=409, detail="event already confirmed")
-
-    event = store.update_and_confirm(event_id, request)
+    try:
+        event = store.update_event(
+            user.id,
+            event_id,
+            request,
+            request.calendar_id,
+            confirm=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if event is None:
-        raise HTTPException(status_code=409, detail="event could not be confirmed")
-    return ParseResponse(event=event)
+        raise HTTPException(status_code=404, detail="event not found")
+    return ParseResponse(
+        event=event,
+        recommended_calendar_id=None,
+        recommendation_reason="",
+        recommendation_confidence=0,
+        proposed_calendar=None,
+    )
 
 
-@app.get("/calendar.ics")
-def calendar_feed(
-    token: str = Query(default=""),
-    settings: Settings = Depends(get_settings),
+@app.patch("/api/events/{event_id}", response_model=ParseResponse)
+def edit_event(
+    event_id: int,
+    request: UpdateEventRequest,
+    user: UserRecord = Depends(require_user),
+    store: EventStore = Depends(get_store),
+) -> ParseResponse:
+    try:
+        event = store.update_event(user.id, event_id, request, request.calendar_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    return ParseResponse(
+        event=event,
+        recommended_calendar_id=None,
+        recommendation_reason="",
+        recommendation_confidence=0,
+        proposed_calendar=None,
+    )
+
+
+@app.delete("/api/events/{event_id}", status_code=204)
+def delete_event(
+    event_id: int,
+    user: UserRecord = Depends(require_user),
     store: EventStore = Depends(get_store),
 ) -> Response:
-    if token != settings.calendar_token:
-        raise HTTPException(status_code=401, detail="invalid calendar token")
-    content = build_calendar(store.confirmed_events(calendar_id=1), settings.calendar_name)
-    return Response(
-        content=content,
-        media_type="text/calendar; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
+    if not store.delete_event(user.id, event_id):
+        raise HTTPException(status_code=404, detail="event not found")
+    return Response(status_code=204)
+
+
+@app.get("/api/agenda", response_model=AgendaResponse)
+def agenda(
+    include_past: bool = Query(default=False),
+    calendar_id: int | None = Query(default=None),
+    user: UserRecord = Depends(require_user),
+    store: EventStore = Depends(get_store),
+) -> AgendaResponse:
+    now = datetime.now(timezone.utc)
+    start = None if include_past else now
+    end = now + timedelta(days=90)
+    return AgendaResponse(
+        events=store.agenda_events(user.id, start=start, end=end, calendar_id=calendar_id)
     )
 
 
 @app.get("/calendars/{calendar_id}.ics")
-def calendar_feed_by_id(
+def calendar_feed(
     calendar_id: int,
     token: str = Query(default=""),
     store: EventStore = Depends(get_store),
@@ -153,7 +397,10 @@ def calendar_feed_by_id(
     calendar = store.find_calendar_by_token(calendar_id, token)
     if calendar is None:
         raise HTTPException(status_code=401, detail="invalid calendar token")
-    content = build_calendar(store.confirmed_events(calendar_id=calendar_id), calendar.name)
+    content = build_calendar(
+        store.confirmed_events(calendar.user_id, calendar_id=calendar_id),
+        calendar.name,
+    )
     return Response(
         content=content,
         media_type="text/calendar; charset=utf-8",
@@ -161,377 +408,17 @@ def calendar_feed_by_id(
     )
 
 
-INDEX_HTML = """
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Calendar Maker</title>
-  <style>
-    :root {
-      color-scheme: light;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f6f7f4;
-      color: #20231f;
-    }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-    }
-    main {
-      width: min(760px, calc(100vw - 32px));
-      display: grid;
-      gap: 16px;
-    }
-    h1 {
-      margin: 0;
-      font-size: 28px;
-      font-weight: 700;
-    }
-    .panel {
-      background: #ffffff;
-      border: 1px solid #d9ddd2;
-      border-radius: 8px;
-      padding: 20px;
-      box-shadow: 0 10px 30px rgba(32, 35, 31, 0.08);
-    }
-    textarea,
-    input {
-      box-sizing: border-box;
-      width: 100%;
-      resize: vertical;
-      border: 1px solid #bcc5b4;
-      border-radius: 6px;
-      padding: 12px;
-      font-size: 16px;
-      line-height: 1.5;
-    }
-    textarea {
-      min-height: 130px;
-    }
-    input {
-      min-height: 44px;
-    }
-    button {
-      border: 0;
-      border-radius: 6px;
-      background: #1f6f61;
-      color: white;
-      padding: 10px 14px;
-      font-size: 15px;
-      cursor: pointer;
-    }
-    button:disabled {
-      cursor: not-allowed;
-      opacity: 0.6;
-    }
-    input:disabled,
-    textarea:disabled {
-      background: #f1f3ee;
-      color: #677066;
-      cursor: not-allowed;
-    }
-    .actions {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-top: 12px;
-      flex-wrap: wrap;
-    }
-    .muted {
-      color: #677066;
-      font-size: 14px;
-    }
-    .event {
-      display: none;
-      gap: 8px;
-    }
-    .event.visible {
-      display: grid;
-    }
-    .form-grid {
-      display: grid;
-      gap: 12px;
-    }
-    label {
-      display: grid;
-      gap: 6px;
-      color: #677066;
-      font-size: 14px;
-    }
-    select {
-      min-height: 44px;
-      border: 1px solid #bcc5b4;
-      border-radius: 6px;
-      padding: 10px 12px;
-      font-size: 16px;
-      background: #ffffff;
-    }
-    .calendar-row {
-      display: grid;
-      grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto;
-      gap: 10px;
-      align-items: end;
-    }
-    .subscribe-link {
-      word-break: break-all;
-    }
-    label span {
-      color: #20231f;
-      font-size: 16px;
-    }
-    .error {
-      color: #a4362a;
-    }
-    .ok {
-      color: #1f6f61;
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <h1>Calendar Maker</h1>
-      <div class="muted">输入一句话，确认后写入订阅日历。</div>
-      <div id="configStatus" class="muted">检查 AI 配置中...</div>
-    </header>
-    <section class="panel">
-      <div class="calendar-row">
-        <label>日历<select id="calendarSelect"></select></label>
-        <label>新日历<input id="calendarName" type="text" placeholder="例如：工作、家庭、提醒"></label>
-        <button id="createCalendarBtn">创建</button>
-      </div>
-      <div class="actions">
-        <span class="muted">订阅链接</span>
-        <a id="subscribeLink" class="subscribe-link" href="#" target="_blank" rel="noreferrer"></a>
-      </div>
-    </section>
-    <section class="panel">
-      <textarea id="text" placeholder="例如：明天下午三点和王总开会，在腾讯会议，预计一小时"></textarea>
-      <div class="actions">
-        <button id="parseBtn">解析</button>
-        <span id="status" class="muted"></span>
-      </div>
-    </section>
-    <section id="eventPanel" class="panel event">
-      <div class="form-grid">
-        <label>标题<input id="title" type="text"></label>
-        <label>开始<input id="start" type="datetime-local"></label>
-        <label>结束<input id="end" type="datetime-local"></label>
-        <label>地点<input id="location" type="text"></label>
-        <label>备注<textarea id="description"></textarea></label>
-      </div>
-      <div class="actions">
-        <button id="confirmBtn">确认添加</button>
-        <span id="confirmStatus" class="muted"></span>
-      </div>
-    </section>
-  </main>
-  <script>
-    const parseBtn = document.getElementById("parseBtn");
-    const confirmBtn = document.getElementById("confirmBtn");
-    const createCalendarBtn = document.getElementById("createCalendarBtn");
-    const calendarSelect = document.getElementById("calendarSelect");
-    const calendarNameInput = document.getElementById("calendarName");
-    const subscribeLink = document.getElementById("subscribeLink");
-    const statusEl = document.getElementById("status");
-    const confirmStatusEl = document.getElementById("confirmStatus");
-    const configStatusEl = document.getElementById("configStatus");
-    const panel = document.getElementById("eventPanel");
-    const appToken = new URLSearchParams(window.location.search).get("token") || "";
-    let currentEventId = null;
-    let currentTimezone = "Asia/Shanghai";
-    let calendars = [];
-    const editableFields = ["title", "start", "end", "location", "description"].map((id) => {
-      return document.getElementById(id);
-    });
-
-    function toDatetimeLocal(value) {
-      const date = new Date(value);
-      const offsetMs = date.getTimezoneOffset() * 60000;
-      return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
-    }
-
-    function fromDatetimeLocal(value) {
-      return new Date(value).toISOString();
-    }
-
-    function setEvent(event) {
-      currentEventId = event.id;
-      currentTimezone = event.timezone || currentTimezone;
-      setEditorLocked(false);
-      document.getElementById("title").value = event.title;
-      document.getElementById("start").value = toDatetimeLocal(event.start);
-      document.getElementById("end").value = toDatetimeLocal(event.end);
-      document.getElementById("location").value = event.location || "";
-      document.getElementById("description").value = event.description || event.source_text;
-      panel.classList.add("visible");
-    }
-
-    function selectedCalendarId() {
-      return Number(calendarSelect.value || "1");
-    }
-
-    function selectedCalendar() {
-      return calendars.find((calendar) => calendar.id === selectedCalendarId()) || calendars[0];
-    }
-
-    function setSubscribeLink() {
-      const calendar = selectedCalendar();
-      if (!calendar) {
-        subscribeLink.textContent = "";
-        subscribeLink.removeAttribute("href");
-        return;
-      }
-      const url = `${window.location.origin}/calendars/${calendar.id}.ics?token=${encodeURIComponent(calendar.token)}`;
-      subscribeLink.href = url;
-      subscribeLink.textContent = url;
-    }
-
-    function renderCalendars() {
-      calendarSelect.innerHTML = "";
-      calendars.forEach((calendar) => {
-        const option = document.createElement("option");
-        option.value = String(calendar.id);
-        option.textContent = calendar.name;
-        calendarSelect.appendChild(option);
-      });
-      setSubscribeLink();
-    }
-
-    async function loadCalendars() {
-      const response = await fetch("/api/calendars", {
-        headers: {"X-App-Token": appToken}
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "日历加载失败");
-      calendars = data.calendars;
-      renderCalendars();
-    }
-
-    async function createCalendar() {
-      const name = calendarNameInput.value.trim();
-      if (!name) return;
-      createCalendarBtn.disabled = true;
-      try {
-        const response = await fetch("/api/calendars", {
-          method: "POST",
-          headers: {"Content-Type": "application/json", "X-App-Token": appToken},
-          body: JSON.stringify({name})
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "创建失败");
-        calendars.push(data.calendar);
-        renderCalendars();
-        calendarSelect.value = String(data.calendar.id);
-        calendarNameInput.value = "";
-        setSubscribeLink();
-      } catch (error) {
-        statusEl.textContent = error.message;
-        statusEl.className = "muted error";
-      } finally {
-        createCalendarBtn.disabled = false;
-      }
-    }
-
-    function setEditorLocked(locked) {
-      editableFields.forEach((field) => {
-        field.disabled = locked;
-      });
-      confirmBtn.disabled = locked;
-    }
-
-    function readEventForm() {
-      return {
-        title: document.getElementById("title").value.trim(),
-        start: fromDatetimeLocal(document.getElementById("start").value),
-        end: fromDatetimeLocal(document.getElementById("end").value),
-        timezone: currentTimezone,
-        location: document.getElementById("location").value.trim() || null,
-        description: document.getElementById("description").value.trim() || null
-      };
-    }
-
-    async function loadConfigStatus() {
-      try {
-        const response = await fetch("/api/config/status");
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "配置检查失败");
-        if (data.api_key_configured) {
-          configStatusEl.textContent = `AI 已配置：${data.ai_provider} / ${data.model}`;
-          configStatusEl.className = "muted ok";
-        } else {
-          configStatusEl.textContent = "AI 未配置：请在启动服务前设置 QWEN_API_KEY，或写入 .env";
-          configStatusEl.className = "muted error";
-        }
-      } catch (error) {
-        configStatusEl.textContent = error.message;
-        configStatusEl.className = "muted error";
-      }
-    }
-
-    loadConfigStatus();
-    loadCalendars().catch((error) => {
-      statusEl.textContent = error.message;
-      statusEl.className = "muted error";
-    });
-
-    calendarSelect.addEventListener("change", setSubscribeLink);
-    createCalendarBtn.addEventListener("click", createCalendar);
-
-    parseBtn.addEventListener("click", async () => {
-      const text = document.getElementById("text").value.trim();
-      if (!text) return;
-      parseBtn.disabled = true;
-      setEditorLocked(false);
-      statusEl.textContent = "解析中...";
-      statusEl.className = "muted";
-      confirmStatusEl.textContent = "";
-      try {
-        const response = await fetch("/api/parse", {
-          method: "POST",
-          headers: {"Content-Type": "application/json", "X-App-Token": appToken},
-          body: JSON.stringify({text, calendar_id: selectedCalendarId()})
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "解析失败");
-        setEvent(data.event);
-        statusEl.textContent = "请确认解析结果";
-      } catch (error) {
-        statusEl.textContent = error.message;
-        statusEl.className = "muted error";
-      } finally {
-        parseBtn.disabled = false;
-      }
-    });
-
-    confirmBtn.addEventListener("click", async () => {
-      if (!currentEventId) return;
-      confirmBtn.disabled = true;
-      confirmStatusEl.textContent = "保存中...";
-      try {
-        const response = await fetch(`/api/events/${currentEventId}/confirm`, {
-          method: "POST",
-          headers: {"Content-Type": "application/json", "X-App-Token": appToken},
-          body: JSON.stringify(readEventForm())
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "保存失败");
-        confirmStatusEl.textContent = "已添加到订阅日历";
-        setEditorLocked(true);
-        document.getElementById("text").value = "";
-        statusEl.textContent = "可以继续输入下一条";
-      } catch (error) {
-        confirmStatusEl.textContent = error.message;
-        confirmStatusEl.className = "muted error";
-      } finally {
-        confirmBtn.disabled = false;
-      }
-    });
-  </script>
-</body>
-</html>
-"""
+@app.get("/feeds/all.ics")
+def all_calendar_feed(
+    token: str = Query(default=""),
+    store: EventStore = Depends(get_store),
+) -> Response:
+    user = store.user_by_feed_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid feed token")
+    content = build_calendar(store.confirmed_events(user.id), "All Calendars")
+    return Response(
+        content=content,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
