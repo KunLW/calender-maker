@@ -104,23 +104,27 @@ def maker_page() -> str:
     <div class="actions"><button id="confirm">Confirm event</button><span id="confirmStatus"></span></div></section></main>
     """, """
     let calendars=[],eventId=null,proposed=null;
+    const sourceInput=$("source"),preferredSelect=$("preferred"),parseButton=$("parse"),parseStatusText=$("parseStatus");
+    const draftPanel=$("draft"),recommendationText=$("recommendation"),proposalBox=$("proposal"),titleInput=$("title");
+    const calendarSelect=$("calendar"),startInput=$("start"),endInput=$("end"),locationInput=$("location");
+    const timezoneInput=$("timezone"),descriptionInput=$("description"),confirmButton=$("confirm"),confirmStatusText=$("confirmStatus");
     function options(selected){return calendars.map(c=>`<option value="${c.id}" ${c.id===selected?"selected":""}>${esc(c.name)}</option>`).join("")}
-    async function load(){const data=await api("/api/calendars");calendars=data.calendars;preferred.innerHTML='<option value="">Let AI choose</option>'+options();calendar.innerHTML=options()}
-    parse.onclick=async()=>{parse.disabled=true;parseStatus.textContent="Compiling...";
+    async function load(){const data=await api("/api/calendars");calendars=data.calendars;preferredSelect.innerHTML='<option value="">Let AI choose</option>'+options();calendarSelect.innerHTML=options()}
+    parseButton.onclick=async()=>{parseButton.disabled=true;parseStatusText.textContent="Compiling...";
       try{const data=await api("/api/parse",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-      text:source.value,preferred_calendar_id:preferred.value?Number(preferred.value):null})});eventId=data.event.id;proposed=data.proposed_calendar;
-      title.value=data.event.title;start.value=localInput(data.event.start);end.value=localInput(data.event.end);location.value=data.event.location||"";
-      timezone.value=data.event.timezone;description.value=data.event.description||"";calendar.innerHTML=options(data.event.calendar_id);
-      recommendation.textContent=data.recommendation_reason?`AI suggestion: ${data.recommendation_reason} (${Math.round(data.recommendation_confidence*100)}%)`:"";
-      if(proposed){proposal.classList.remove("hidden");proposal.innerHTML=`No existing calendar fits well. Suggested: <strong>${esc(proposed.name)}</strong>
-      <button class="secondary" id="createSuggested">Create calendar</button>`;createSuggested.onclick=createProposed}else proposal.classList.add("hidden");
-      draft.classList.remove("hidden");parseStatus.textContent="Review the result";}catch(e){parseStatus.textContent=e.message;parseStatus.className="error"}finally{parse.disabled=false}};
+      text:sourceInput.value,preferred_calendar_id:preferredSelect.value?Number(preferredSelect.value):null})});eventId=data.event.id;proposed=data.proposed_calendar;
+      titleInput.value=data.event.title;startInput.value=localInput(data.event.start);endInput.value=localInput(data.event.end);locationInput.value=data.event.location||"";
+      timezoneInput.value=data.event.timezone;descriptionInput.value=data.event.description||"";calendarSelect.innerHTML=options(data.event.calendar_id);
+      recommendationText.textContent=data.recommendation_reason?`AI suggestion: ${data.recommendation_reason} (${Math.round(data.recommendation_confidence*100)}%)`:"";
+      if(proposed){proposalBox.classList.remove("hidden");proposalBox.innerHTML=`No existing calendar fits well. Suggested: <strong>${esc(proposed.name)}</strong>
+      <button class="secondary" id="createSuggested">Create calendar</button>`;$("createSuggested").onclick=createProposed}else proposalBox.classList.add("hidden");
+      draftPanel.classList.remove("hidden");parseStatusText.textContent="Review the result";}catch(e){parseStatusText.textContent=e.message;parseStatusText.className="error"}finally{parseButton.disabled=false}};
     async function createProposed(){const data=await api("/api/calendars",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(proposed)});
-      calendars.push(data.calendar);calendar.innerHTML=options(data.calendar.id);preferred.innerHTML='<option value="">Let AI choose</option>'+options();proposal.classList.add("hidden")}
-    confirm.onclick=async()=>{confirm.disabled=true;try{await api(`/api/events/${eventId}/confirm`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-      calendar_id:Number(calendar.value),title:title.value,start:iso(start.value),end:iso(end.value),timezone:timezone.value,
-      location:location.value||null,description:description.value||null})});draft.querySelectorAll("input,textarea,select,button").forEach(x=>x.disabled=true);
-      confirmStatus.textContent="Added to calendar";confirmStatus.className="ok";source.value="";parseStatus.textContent="Ready for another event"}catch(e){confirm.disabled=false;confirmStatus.textContent=e.message;confirmStatus.className="error"}};
+      calendars.push(data.calendar);calendarSelect.innerHTML=options(data.calendar.id);preferredSelect.innerHTML='<option value="">Let AI choose</option>'+options();proposalBox.classList.add("hidden")}
+    confirmButton.onclick=async()=>{confirmButton.disabled=true;try{await api(`/api/events/${eventId}/confirm`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+      calendar_id:Number(calendarSelect.value),title:titleInput.value,start:iso(startInput.value),end:iso(endInput.value),timezone:timezoneInput.value,
+      location:locationInput.value||null,description:descriptionInput.value||null})});draftPanel.querySelectorAll("input,textarea,select,button").forEach(x=>x.disabled=true);
+      confirmStatusText.textContent="Added to calendar";confirmStatusText.className="ok";sourceInput.value="";parseStatusText.textContent="Ready for another event"}catch(e){confirmButton.disabled=false;confirmStatusText.textContent=e.message;confirmStatusText.className="error"}};
     load();
     """)
 
