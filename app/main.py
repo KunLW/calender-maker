@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.ai import MissingAIConfiguration, parse_event_text
 from app.auth import (
@@ -38,7 +39,17 @@ from app.models import (
     UserPublic,
     UserRecord,
 )
-from app.pages import agenda_page, calendars_page, login_page, maker_page, register_page
+from app.pages import (
+    APP_NAME,
+    APP_SHORT_NAME,
+    THEME_COLOR,
+    agenda_page,
+    calendar_detail_page,
+    calendars_page,
+    login_page,
+    maker_page,
+    register_page,
+)
 
 
 @asynccontextmanager
@@ -52,6 +63,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Calendar Maker", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 def set_session_cookie(
@@ -104,9 +116,38 @@ def calendars_view() -> str:
     return calendars_page()
 
 
+@app.get("/calendars/{calendar_id}/edit", response_class=HTMLResponse)
+def calendar_detail_view(calendar_id: int) -> str:
+    return calendar_detail_page(calendar_id)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/manifest.webmanifest")
+def web_manifest() -> JSONResponse:
+    return JSONResponse(
+        {
+            "name": APP_NAME,
+            "short_name": APP_SHORT_NAME,
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": THEME_COLOR,
+            "theme_color": THEME_COLOR,
+            "icons": [
+                {
+                    "src": "/static/icons/app-icon.svg",
+                    "sizes": "any",
+                    "type": "image/svg+xml",
+                    "purpose": "any maskable",
+                }
+            ],
+        },
+        media_type="application/manifest+json",
+    )
 
 
 @app.post("/api/auth/register", response_model=AuthResponse)

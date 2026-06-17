@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Calendar Maker app icon">
+  <rect width="512" height="512" rx="104" fill="#176d5e"/>
+  <rect x="112" y="132" width="288" height="268" rx="34" fill="#ffffff"/>
+  <rect x="112" y="132" width="288" height="76" rx="34" fill="#e5f0eb"/>
+  <rect x="112" y="176" width="288" height="32" fill="#e5f0eb"/>
+  <rect x="154" y="92" width="34" height="86" rx="17" fill="#ffffff"/>
+  <rect x="324" y="92" width="34" height="86" rx="17" fill="#ffffff"/>
+  <path d="M184 296l46 46 104-116" fill="none" stroke="#176d5e" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
