@@ -28,14 +28,21 @@ async function api(url, options={}) {
   if (response.status === 401) { window.location.href="/login"; throw new Error("Authentication required"); }
   if (response.status === 204) return null;
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || "Request failed");
+  if (!response.ok) throw new Error(formatError(data.detail));
   return data;
+}
+function formatError(detail){
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map(item => item.msg || item.message || String(item)).join("; ");
+  if (detail && typeof detail === "object") return detail.msg || detail.message || JSON.stringify(detail);
+  return "Request failed";
 }
 async function logout(){await api("/api/auth/logout",{method:"POST"});window.location.href="/login"}
 function esc(value){return String(value ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#039;"}[c]))}
 function localInput(value){const d=new Date(value),o=d.getTimezoneOffset()*60000;return new Date(d-o).toISOString().slice(0,16)}
 function iso(value){return new Date(value).toISOString()}
 async function copyText(value, target){await navigator.clipboard.writeText(value);target.textContent="Copied";setTimeout(()=>target.textContent="Copy",1400)}
+const $ = (id) => document.getElementById(id);
 """
 
 
@@ -58,8 +65,9 @@ def login_page() -> str:
     <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password"></div>
     <div class="actions"><button id="submit">Log in</button><a href="/register">Create account</a><span id="status"></span></div>
     </section></main>""", """
-    submit.onclick=async()=>{try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({email:email.value,password:password.value})});location.href="/"}catch(e){status.textContent=e.message;status.className="error"}};
+    const emailInput=$("email"),passwordInput=$("password"),submitButton=$("submit"),statusText=$("status");
+    submitButton.onclick=async()=>{try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({email:emailInput.value,password:passwordInput.value})});location.href="/"}catch(e){statusText.textContent=e.message;statusText.className="error"}};
     """, nav=False)
 
 
@@ -71,8 +79,9 @@ def register_page() -> str:
     <div class="field"><label>Invite code</label><input id="invite" autocomplete="off"></div>
     <div class="actions"><button id="submit">Create account</button><a href="/login">Log in</a><span id="status"></span></div>
     </section></main>""", """
-    submit.onclick=async()=>{try{await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({email:email.value,password:password.value,invite_code:invite.value})});location.href="/"}catch(e){status.textContent=e.message;status.className="error"}};
+    const emailInput=$("email"),passwordInput=$("password"),inviteInput=$("invite"),submitButton=$("submit"),statusText=$("status");
+    submitButton.onclick=async()=>{try{await api("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({email:emailInput.value,password:passwordInput.value,invite_code:inviteInput.value})});location.href="/"}catch(e){statusText.textContent=e.message;statusText.className="error"}};
     """, nav=False)
 
 
