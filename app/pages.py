@@ -178,8 +178,10 @@ def calendars_page() -> str:
     let calendars=[];const colors=["#2563eb","#0f766e","#7c3aed","#be123c","#b45309","#4d7c0f","#0369a1","#6b7280"];
     function colorOptions(selected){return colors.map(c=>`<option value="${c}" ${c===selected?"selected":""}>${c}</option>`).join("")}
     function wireCopies(){document.querySelectorAll(".copy").forEach(b=>b.onclick=()=>copyText(b.dataset.url,b))}
+    function downloadUrl(urls){const url=new URL(urls.https_url);return url.pathname+url.search}
     function subBlock(urls){return `<div class="subscription"><a href="${urls.webcal_url}">Subscribe to Apple Calendar</a>
-    <span class="url">${esc(urls.https_url)}</span><button class="secondary copy" data-url="${esc(urls.https_url)}">Copy</button></div>`}
+    <a href="${downloadUrl(urls)}">Download ICS</a><span class="url">${esc(urls.https_url)}</span>
+    <button class="secondary copy" data-url="${esc(urls.https_url)}">Copy</button></div>`}
     async function load(){const data=await api("/api/calendars/manage");calendars=data.calendars;const all=await api("/api/feeds/all/subscription");
       allSubscription.innerHTML=subBlock(all)+'<div class="actions"><button class="secondary" id="regenAll">Regenerate link</button></div>';regenAll.onclick=async()=>{await api("/api/feeds/all/regenerate-token",{method:"POST"});load()};
       list.innerHTML="";for(const c of calendars){const urls=await api(`/api/calendars/${c.id}/subscription`);const el=document.createElement("div");el.className="calendar-card";
